@@ -19,17 +19,7 @@ _PORT = 20
 _SOCK = None
 _USAGE = "  Usage: python3 serv.py <PORT #>"
 _FILE_LOCK = threading.Lock()
-_RUNNING = True
-_CLIENT_NUM = 0
-
-
-def _log(msg):
-	sys.stdout.write(msg + '\n')
-	sys.stdout.flush()
-
-def _err_log(msg):
-	sys.stderr.write(msg + '\n')
-	sys.stderr.flush()
+_CLIENT_NUM = 1
 
 
 class ClientThread(threading.Thread):
@@ -63,11 +53,13 @@ class ClientThread(threading.Thread):
 				# Too many arguments given
 				self.log('error parsing: ' + command)
 				self.kill()
-				raise
+				self.command = ''
+				return
 			self.command = command
 			self.filename = fn
 		else:
 			_err_log('Received invalid command: ' + command)
+			self.command = ''
 			self.kill()
 
 	def serve_command(self):
@@ -92,14 +84,15 @@ class ClientThread(threading.Thread):
 		num_bytes_read = 0
 		while num_bytes_read < n:
 			# Receive in chunks of 2048
+			if not self.connection:
+				self.running = False
+				return b''
 			try:
 				datum = self.connection.recv(min(n - num_bytes_read, 2048))
 			except:
 				self.kill()
-				self.running = False
-				self.log('lost socket connection during recv.')
+				self.log('connection lost.')
 				data = []
-				#raise
 				return b''
 			data.append(datum)
 			num_bytes_read += len(datum)
@@ -124,7 +117,6 @@ class ClientThread(threading.Thread):
 				connection.close()
 				self.log('data upload failed.')
 				data = []
-				#raise
 				return b''
 			data.append(datum)
 			num_bytes_read += len(datum)
@@ -170,33 +162,34 @@ class ClientThread(threading.Thread):
 		data_socket.sendall(data_size_bytes + data.encode('utf-8'))
 		data_socket.shutdown(socket.SHUT_RDWR)
 		data_socket.close()
-		#except:
-		#	self.log("get FAILURE")
-		#	self.connection.send(b'F')
-		#	return
-		#else:
 		self.connection.send(b'S')
 		self.log('get ' + self.filename + ' SUCCESS!')
 
 	def put(self):
-		if os.path.exists(self.filename):
-			self.connection.send(b'F')
-			self.log('put FAILURE!')
-			return
 		data_socket = socket.socket()
 		data_socket.connect((self.client_host, self.ephemeral))
-		self.connection.send(b'R')
-		data = self._data_recv(data_socket).decode('utf-8')
 		with _FILE_LOCK:
-			with open(self.filename, 'w') as f:
-				f.write(data)
+			if os.path.exists(self.filename):
+				self.connection.send(b'F')
+				self.log('put FAILURE!')
+			else:
+				self.connection.send(b'S')
+				try:
+					data = self._data_recv(data_socket).decode('utf-8')
+					with open(self.filename, 'w') as f:
+						f.write(data)
+				except:
+					self.connection.send(b'F')
+					self.log('put FAILURE!')
+				else:
+					self.connection.send(b'S')
+					self.log('put ' + self.filename + ' SUCCESS!')
 		try:
 			data_socket.shutdown(socket.SHUT_RDWR)
 			data_socket.close()
 		except:
 			pass
-		self.connection.send(b'S')
-		self.log('put ' + self.filename + ' SUCCESS!')
+		
 
 	def log(self, msg):
 		client_msg = 'Client #' + str(self.ID) + ': ' + msg + '\n'
@@ -204,14 +197,14 @@ class ClientThread(threading.Thread):
 		sys.stdout.flush()
 
 	def kill(self):
-		#self.log('killing.')
 		self.running = False
-		# TODO: Disrupt send/recv calls ??
 		self.command = ''
+		if not self.connection:
+			return
 		try:
 			self.connection.shutdown(socket.SHUT_RDWR)
 			self.connection.close()
-		except:
+		except OSError as e:
 			pass
 		finally:
 			self.connection = None
@@ -230,6 +223,16 @@ class ClientThread(threading.Thread):
 		self.log('terminating.')
 
 
+def _log(msg):
+	sys.stdout.write(msg + '\n')
+	sys.stdout.flush()
+
+
+def _err_log(msg):
+	sys.stderr.write(msg + '\n')
+	sys.stderr.flush()
+
+
 def check_args(args):
 	global _PORT
 	if len(args) != 2:
@@ -237,19 +240,19 @@ def check_args(args):
 		sys.exit(0)
 	try:
 		_PORT = int(args[1])
-	except:
+	except ValueError as e:
 		_err_log("Invalid port number supplied\n" + _USAGE)
 		sys.exit(1)
 
 
 def main():
-	global _SOCK, _RUNNING
+	global _SOCK
 	_SOCK = socket.socket()
 	clients = []
 	client_socket = None
 	try:
 		#The following is helpful if frequently restarting server.
-		_SOCK.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+		#_SOCK.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 		_SOCK.bind(('localhost', _PORT))
 		_SOCK.listen(5)
 	except OSError as e:
@@ -258,7 +261,7 @@ def main():
 		sys.exit(1)
 	_log("Server accepting connections on port {}.".format(_PORT))
 	_log("Exit the server with CTRL+C")
-	while _RUNNING:
+	while True:
 		try:
 			# Accept blocks until incoming connection
 			client_socket, addr = _SOCK.accept()
