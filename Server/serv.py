@@ -1,8 +1,21 @@
+#! /usr/local/bin/python3
 """ Simplified FTP server
 Author: Phillip Stewart
 
+This is a custom FTP server that supports multiple simultaneous clients.
+Each client is allocated a thread.
+A threading.Lock object is used to protect files from race conditions.
 
+The ClientThread class extends threading.Thread, and so calling .start()
+	on the object begins thread execution and invokes the object's run() method
 
+The os library is used to check file paths.
+The sys library is used to gather command-line arguments.
+The socket library is used for TCP socket connections.
+The struct library is used to pack and unpack data to/from network bytes.
+The subprocess library is used to invoke 'ls' and recover its output.
+
+The PHIL-FTP protocol used is described in PHIL-FTP.txt
 """
 
 
@@ -23,10 +36,21 @@ _CLIENT_NUM = 1
 
 
 class ClientThread(threading.Thread):
-	def __init__(self, connection):
+	"""ClientThread class extends threading.Thread
+	This class represents the thread created for each client connected to the
+	server. The methods defined here act on each individual client thread
+	separately, however, the same file lock is passed to each thread.
+	"""
+	def __init__(self, connection, lock):
+		"""Initialize an instance of ClientThread
+		Args:
+			connection - connected socket.socket object
+			lock - threading.Lock object
+		"""
 		threading.Thread.__init__(self)
 		self.connection = connection
 		self.client_host = connection.getsockname()[0]
+		self.file_lock = lock
 		self.running = True
 		self.command = ''
 		self.filename = ''
@@ -36,11 +60,16 @@ class ClientThread(threading.Thread):
 		_CLIENT_NUM += 1
 
 	def read_command(self):
-		size_bytes = self._recv(2)
+		"""Read a command from the client
+		First byte read is the length of the command.
+		Then 2 bytes for ephemeral port.
+		Then the command, which is saved to self.command
+		"""
+		size_bytes = self._recv(1)
 		if not size_bytes:
 			self.kill()
 			return
-		size = struct.unpack('!H', size_bytes)[0]
+		size = struct.unpack('!B', size_bytes)[0]
 		port_bytes = self._recv(2)
 		self.ephemeral = struct.unpack('!H', port_bytes)[0]
 		command = self._recv(size).decode('utf-8')
@@ -63,6 +92,7 @@ class ClientThread(threading.Thread):
 			self.kill()
 
 	def serve_command(self):
+		"""Executes the command that was read by read_command"""
 		if not self.command:
 			self.kill()
 			return
@@ -80,6 +110,7 @@ class ClientThread(threading.Thread):
 			self.log("Unexpected command: {}.".format(command))
 
 	def _recv(self, n):
+		"""Receives n bytes from self.connection"""
 		data = []
 		num_bytes_read = 0
 		while num_bytes_read < n:
@@ -99,6 +130,10 @@ class ClientThread(threading.Thread):
 		return b''.join(data)
 
 	def _data_recv(self, connection):
+		"""Receives data from connection
+		Args: connection - the socket connection from which to read
+		The first 4 bytes of data define the size of the following data.
+		"""
 		size_bytes = connection.recv(4)
 		if len(size_bytes) < 4:
 			size_bytes += connection.recv(4 - len(size_bytes))
@@ -129,9 +164,11 @@ class ClientThread(threading.Thread):
 			send the ephemeral port to the client,
 			send the size of the listing (as a packed int)
 			and then the listing 
+		A single byte status is sent over the control connection
+			'S' for success, 'F' for failure.
 		"""
 		listing = b''
-		with _FILE_LOCK:
+		with self.file_lock:
 			listing = subprocess.check_output('ls')
 		if not listing:
 			self.log("ls FAILURE!")
@@ -145,16 +182,28 @@ class ClientThread(threading.Thread):
 		self.connection.send(b'S')
 
 	def get(self):
+		"""Delivers a file over the data connection.
+		Attempts to read file and send it over the data_socket
+		The first 4 bytes of data define the size of the file.
+		Upon successful delivery 'S' sent over control connection.
+			else, 'F' sent.
+		"""
 		data = ''
 		data_socket = socket.socket()
 		data_socket.connect((self.client_host, self.ephemeral))
-		if not os.path.exists(self.filename):
+		if self.filename.startswith('.'):
+			self.log("Client requesting a . file.")
+			self.log("get FAILURE!")
+			data_socket.sendall(struct.pack('!I', 0))
+			self.connection.send(b'F')
+			return
+		elif not os.path.exists(self.filename):
 			self.log("Client requesting non-existent file.")
 			self.log("get FAILURE!")
 			data_socket.sendall(struct.pack('!I', 0))
 			self.connection.send(b'F')
 			return
-		with _FILE_LOCK:
+		with self.file_lock:
 			with open(self.filename, 'r') as f:
 				data = f.read()
 		data_size = len(data)
@@ -166,11 +215,23 @@ class ClientThread(threading.Thread):
 		self.log('get ' + self.filename + ' SUCCESS!')
 
 	def put(self):
+		"""Attempt to put a file.
+		Connect to data socket.
+		If can put, send 'S' and read data.
+			else send 'F' and return
+		If write success, send 'S'
+			else send 'F'
+		"""
 		data_socket = socket.socket()
 		data_socket.connect((self.client_host, self.ephemeral))
-		with _FILE_LOCK:
-			if os.path.exists(self.filename):
+		with self.file_lock:
+			if self.filename.startswith('.'):
 				self.connection.send(b'F')
+				self.log("Client attempting to put a . file.")
+				self.log('put FAILURE!')
+			elif os.path.exists(self.filename):
+				self.connection.send(b'F')
+				self.log("Client attempting to overwrite file.")
 				self.log('put FAILURE!')
 			else:
 				self.connection.send(b'S')
@@ -189,14 +250,19 @@ class ClientThread(threading.Thread):
 			data_socket.close()
 		except:
 			pass
-		
-
+	
 	def log(self, msg):
+		"""Write a message to stdout"""
 		client_msg = 'Client #' + str(self.ID) + ': ' + msg + '\n'
 		sys.stdout.write(client_msg)
 		sys.stdout.flush()
 
 	def kill(self):
+		"""Close connection, set running to False
+		Does not actually kill thread,
+			however, shutting down the socket and toggling the running flag
+			should effectively stop thread execution very quickly.
+		"""
 		self.running = False
 		self.command = ''
 		if not self.connection:
@@ -210,6 +276,10 @@ class ClientThread(threading.Thread):
 			self.connection = None
 
 	def run(self):
+		"""Begin thread execution
+		This is a threading.Thread method which is invoked
+			after the .start method is called.
+		"""
 		self.log('starting.')
 		while self.running:
 			self.read_command()
@@ -224,16 +294,27 @@ class ClientThread(threading.Thread):
 
 
 def _log(msg):
+	"""Write msg to stdout
+	Yes, I could have used print statements everywhere...
+		but I prefer writing my own log function for a number of reasons:
+		-write and flush performs more reliably with multiple threads
+		-abstracting out logging allows changing the logging method easily
+			-such as logging to file.
+		-split logging to stdout and stderr more clearly.
+	Same goes for log method in ClientThread.
+	"""
 	sys.stdout.write(msg + '\n')
 	sys.stdout.flush()
 
 
 def _err_log(msg):
+	"""Write msg to stderr"""
 	sys.stderr.write(msg + '\n')
 	sys.stderr.flush()
 
 
 def check_args(args):
+	"""Verify that an integer was supplied for port #"""
 	global _PORT
 	if len(args) != 2:
 		_log(_USAGE)
@@ -246,6 +327,11 @@ def check_args(args):
 
 
 def main():
+	"""The server's main function
+	Bind, listen, and accept on supplied port.
+	While accepting, create ClientThreads for each client connection.
+	On CTRL+C - attempt to kill any running threads and exit.
+	"""
 	global _SOCK
 	_SOCK = socket.socket()
 	clients = []
@@ -268,7 +354,7 @@ def main():
 		except KeyboardInterrupt as e:
 			_log("\nShutting down server...")
 			break
-		client = ClientThread(client_socket)
+		client = ClientThread(client_socket, _FILE_LOCK)
 		client.start()
 		clients.append(client)
 		clients = [client for client in clients if client.is_alive()]
@@ -279,6 +365,10 @@ def main():
 
 
 if __name__ == "__main__":
+	"""Standard main boiler-plate for python
+	This ensures that main function does not execute on import
+	-only run if this script was invoked as the main script.
+	"""
 	check_args(sys.argv)
 	main()
 

@@ -1,0 +1,192 @@
+RFC 65536                                                          October 2015
+===============================================================================
+         Phillip's Hastily Implemented Luxurious File Tranfer Protocol
+                                  (PHIL-FTP)
+
+1. Overview
+    The PHIL-FTP protocol describes a simplified file transfer protocol for
+client and server over TCP. The server-side supports multiple concurrent
+clients via multi-threading. Clients connect to the server by providing an
+address and port. Clients may retrieve a file listing of the server directory,
+retrieve files, and upload files.
+    Commands are sent over a user defined port, and data is transmitted over
+an ephemeral port chosen by the client program.
+
+
+2. Ports
+    2.1 Control Port
+        The control port is used for the transmission of control messages.
+    Client's send commands from the user over this port as messages, and
+    receive success/faliure messages over this port from the server.
+        The control port number must be specified when invoking the server,
+    and when invoking the client program. The server must be running prior to
+    starting the client programs so that clients may connect. The port
+    specified for the client must match that of the server.
+        As a reminder, ports 0-1023 are system ports, and ports 49152-65535 are
+    ephemeral ports. Many ports in the range 1024-49151 are registered, but may
+    still be used. Although PHIL-FTP has no registered port, we recommend
+    using port 2048.
+
+    2.2 Data Port
+        Data ports are ephemeral ports chosen by the client for one-time
+    transmission of data. For each file download and upload, and for each
+    directory listing, a new data connection is made over an ephemeral port.
+    The client program must create a socket and request an unused port prior
+    to submitting an 'ls', 'get', or 'put' command to the server. The port
+    number is sent to the server along with the command, and the server
+    connects to the port. Upon completion of transmission, the socket is
+    shutdown and closed.
+        In the case of a successful transfer, the server receives a command
+    with the data port, connects and transmits, and then closes the connection.
+    However, there may be instances when a command fails. For example, a client
+    user submits an invalid filename for a 'put' command. The client program
+    will allocate a port and submit it to the server. If the server is unable
+    to put the file, it will return a failure message over the control
+    connection. In this case, the client has an unused data connection, which
+    for program simplification, it may be listening for a connection on. To
+    ensure the client program does not hang, and to simplify the protocol, the
+    server should always connect to the data port provided by the client. In
+    the event of failure, the data connection may be closed. In this way, the
+    client may always listen for the server to make a connection after sending
+    a command. To further avoid hanging on accept, a timeout of 5 seconds is
+    recommended on socket connections.
+
+
+3. Control messages
+    3.1 Overview
+        Control messages are sent over the specified control port from client
+    to server. The structure of a control message is as follows:
+
+        +----------------+-------------+--------------------------+
+        | Command length |  Data Port  |        Command           |
+        |     1 byte     |   2 bytes   |    'length' bytes        |
+        +----------------+-------------+--------------------------+
+
+    The first byte defines the length of the following command as an unsigned
+    byte integer. The command should not exceed 255 bytes, and so a single byte
+    should be sufficient to describe the length of the command. Prior to
+    sending a 'ls', 'get', or 'put' command, the client creates a data
+    connection over an ephemeral port. The next 2 bytes of the message define
+    the data port as an unsigned short integer. The command is a string of
+    ascii characters which follows the formats described in the sections below
+    (3.2, 3.3, 3.4, 3.5).
+        For example, an 'ls' command with data port 50000 would be sent as:
+        
+        +------------+--------------+----------------+
+        | length = 2 | port = 50000 | command = 'ls' |
+        +------------+--------------+----------------+
+        In hexadecimal: 02 C3 50 6C 73
+
+        Finally, success and failure messages are sent over the control port
+    upon certain events. These messages are a single byte, either the ascii
+    character 'S' for success or 'F' for failure.
+
+    3.2 ls
+        As shown above, the ls command should be sent with length 2, the data
+    port, and the ascii characters 'l' and 's'. PHIL-FTP does not allow
+    arguments for ls, so clients cannot view listings of subdirectories or
+    hidden files. The listing will be transmitted over the data port, and if
+    the server successfully sends the directory listing, it will transmit
+    a success message over the control port.
+
+    3.3 get
+        A 'get' command must be provided a single argument, the name of the
+    file to be downloaded from the server. For example, if the server directory
+    listing shows a file 'sample.txt', then a valid get command would be:
+    ftp> get sample.txt
+    If a valid filename is provided, the file will be downloaded over the data
+    port, and a success message will be sent from server to client over the
+    control port on successfully sending the file's data.
+        Standard PHIL-FTP protocol does not allow retrieval of hidden files
+    or files from a directory above the server's ftp program directory. Also,
+    PHIL-FTP does not allow overwriting of files, and so if the provided
+    filename matches an existing file in the client's local directory, the
+    get command should fail.
+
+    3.4 put
+        Similar to 'get', 'put' takes a single argument, the name of the file to
+    be uploaded to the server. The client message will specify the data port
+    and filename to the server. If the server is able to put the specified file
+    in its directory, a success message will be transmitted to the client,
+    otherwise a failure message will be transmitted and the client should close
+    the data connection without transmitting the file contents. Upon receipt
+    of a success message, the client uploads the file over the data port and
+    awaits another status message from the server. Upon successfully writing
+    the file, the server will transmit a success message. If the file failed
+    to upload,
+        Standard PHIL-FTP protocol does not allow uploading of hidden files
+    or files to a directory above the server's ftp program directory, that is,
+    filenames must not begin with a dot. Also, PHIL-FTP does not allow
+    overwriting of files, and so if the provided filename matches an existing
+    file in the server's local directory, the put command should fail.
+
+    3.5 quit
+        The 'quit' command should be sent with command length 4, data port 0,
+    and the 4 ascii characters 'quit'. In hexadecimal: 02 00 00 71 75 69 74.
+    Upon receipt of the message, the server should transmit a success message
+    and shut down the connections and release all resources for that client.
+        Client's may check for success from the server after sending a quit
+    message, however it is not required. For simplicity, a client may assume
+    the message was successfully sent and close down. This allows for quick
+    client shutdown, and simple error handling. For example, if the client
+    program is interrupted by a SIGINT, it may send a quit message and exit.
+    This is preferable to simply closing the connection, as the server may not
+    be aware of a shutdown without the quit message.
+
+    3.6 Success/Failure
+        The server must occasionally respond with a success or failure message.
+    Upon successful delivery of data for a directory listing or file download,
+    the server will send success. Also, if a put is allowed with the given
+    filename, a success message will be sent to the client notifying that data
+    upload may begin, and another success message will be sent on successful
+    writing of the file to disk. Failure messages will be sent in these
+    instances if data transmission was not successful, if upload is not
+    allowed, or if file upload failed.
+        A success message consists of a single byte, the ascii character 'S'.
+    And a failure message consists of a single byte, the ascii character 'F'.
+
+
+4. Data Messages
+    The 'ls', 'get', and 'put' messages each contain a port number chosen by
+the client for data transmission. The data contents of each response will be
+transmitted over this port. For the 'ls' and 'get' commands, data will be
+transmitted from the server to the client, and for the 'put' command, data will
+be transmitted from client to server over the data connection.
+    The structure of a data message is as follows:
+
+    +-------------+----------------------------+
+    | Data length |           Data             |
+    |   4 bytes   |      'length' bytes        |
+    +-------------+----------------------------+
+
+    The length of the data will be specified by the first 4 bytes of the
+message as an unsigned integer. The following data may be the ascii contents of
+a directory listing, or the contents of a file.
+
+
+5. Message Transmission
+    To ensure successful receipt of messages, the first bytes of each message
+type are discrete byte-lengths which specify the size of the following message.
+A call to 'recv' on a socket will not always return the entire message, as some
+messages can be very large and may be segmented. Therefore, the first discrete
+number of bytes should be read and verified, and the following message should
+be similarly read and verified to ensure the entire message is recieved.
+    This can be accomplished by tracking the number of bytes expected and the
+number of bytes received. While the full amount of data expected is not yet
+recieved, subsequent calls should be made, and data appended. Thus all data can
+be successfully recieved, and any error, timeout, or null receipt signals an
+error with the connection.
+    Transmission of data can be accomplished in the same way, by continuously
+sending unsent data. However, this is made simpler by 'sendall', which
+accomplishes this task for us.
+
+
+6. Final notes
+    Socket connections are made over TCP, and the initial implementation of
+PHIL-FTP was written in Python 3. This protocol was written for an assignment
+in Network Communications, and is not intended as a viable alternative to FTP.
+The author, Phillip Stewart, wrote designed this protocol for educational
+purposes, and as such, any use of it is considered fair as long as the source
+is attributed.
+===============================================================================
+

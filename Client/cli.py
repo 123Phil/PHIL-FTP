@@ -1,7 +1,23 @@
+#! /usr/local/bin/python3
 """ Simplified FTP client
 Author: Phillip Stewart
 
+This is a custom FTP client that connects to the accompanying server.
 
+If running the server and client on the same machine,
+	use 'localhost' as host name.
+	else, use the name of the server.
+
+The user is given a prompt, and entered commands are parsed.
+	valid commands are sent to the server,
+	and data is transferred over a separate connection.
+
+The os library is used to check file paths.
+The sys library is used to gather command-line arguments.
+The socket library is used for TCP socket connections.
+The struct library is used to pack and unpack data to/from network bytes.
+
+The PHIL-FTP protocol used is described in PHIL-FTP.txt
 """
 
 
@@ -12,7 +28,9 @@ import struct
 
 
 _SOCK = None
+# Host is specified by command-line argument
 _HOST = 'localhost'
+# Port is specified by command-line argument
 _PORT = 20
 _USAGE = "  Usage: python3 cli.py <HOST> <PORT #>"
 _USAGE2 = """Valid commands are:
@@ -24,15 +42,25 @@ _PROMPT = 'ftp> '
 
 
 def _log(msg):
+	"""Write msg to stdout
+	Yes, I could have used print statements everywhere...
+		but I prefer writing my own log function for a number of reasons:
+		-write and flush performs more reliably with multiple threads
+		-abstracting out logging allows changing the logging method easily
+		-split logging to stdout and stderr more clearly.
+	"""
 	sys.stdout.write(msg + '\n')
 	sys.stdout.flush()
 
+
 def _err_log(msg):
+	"""Write msg to stderr"""
 	sys.stderr.write(msg + '\n')
 	sys.stderr.flush()
 
 
 def check_args(args):
+	"""Verify command line arguments"""
 	global _HOST, _PORT
 	if len(args) != 3:
 		_log(_USAGE)
@@ -46,6 +74,13 @@ def check_args(args):
 
 
 def get_command():
+	"""Read and verify a user command
+	Allowed commands are:
+		ls
+		get <filename>
+  		put <filename>
+		quit"
+	"""
 	command = input(_PROMPT)
 	if command in ['ls', 'quit']:
 		return command
@@ -57,9 +92,10 @@ def get_command():
 
 
 def execute_command(command):
+	"""Run the command"""
 	if command == 'quit':
 		try:
-			_SOCK.sendall(struct.pack('!HH', 4, 0) + b'quit')
+			_SOCK.sendall(struct.pack('!BH', 4, 0) + b'quit')
 		except OSError as e:
 			_log("Error sending 'quit'")
 		disconnect_and_exit()
@@ -74,6 +110,7 @@ def execute_command(command):
 
 
 def ls():
+	"""Send ls command and download listing"""
 	data_socket = pack_and_send('ls')
 	data = recv(data_socket).decode('utf-8')
 	shut(data_socket)
@@ -87,6 +124,7 @@ def ls():
 
 
 def get(command):
+	"""Send get command and download file."""
 	filename = command.split()[1]
 	if os.path.exists(filename):
 		_log("Cannot overwrite local files.")
@@ -107,6 +145,10 @@ def get(command):
 
 
 def put(command):
+	"""Send put command to server and upload file.
+	Server sends 'S' if file upload is allowed,
+	Then sends another 'S' if upload is successful.
+	"""
 	filename = command.split()[1]
 	if not os.path.exists(filename):
 		_log("File does not exist.")
@@ -138,6 +180,9 @@ def put(command):
 
 
 def recv(connection):
+	"""Receives a message over the connection
+	First 4 bytes denote length of message.
+	"""
 	try:
 		size_bytes = connection.recv(4)
 		if len(size_bytes) < 4:
@@ -166,11 +211,18 @@ def recv(connection):
 
 
 def pack_and_send(payload):
-	if len(payload) > 65000:
+	"""Send a command message to server.
+	First byte is size of msg,
+	Then two bytes denote the new data port.
+	The message payload follows.
+	-Attempts to accept server connection over data port,
+		and returns the data connection.
+	"""
+	if len(payload) > 255:
 		_err_log("Unable to send command to server. exiting...")
 		disconnect_and_exit()
 	#pack size into msg
-	msg = struct.pack('!H', len(payload))
+	msg = struct.pack('!B', len(payload))
 	data_socket = socket.socket()
 	data_socket.bind((_HOST, 0))
 	data_socket.listen(1)
@@ -194,6 +246,7 @@ def pack_and_send(payload):
 
 
 def shut(sock):
+	"""Attempt to shutdown/close and null socket"""
 	try:
 		sock.shutdown(socket.SHUT_RDWR)
 		sock.close()
@@ -203,11 +256,17 @@ def shut(sock):
 
 
 def disconnect_and_exit():
+	"""Shutdown the socket and hard-exit"""
 	shut(_SOCK)
 	sys.exit(0)
 
 
 def main():
+	"""Main function for client program
+	Attempt to connect to server.
+	Loop and get command from user
+		execute valid commands.
+	"""
 	global _SOCK
 	_SOCK = socket.socket()
 	try:
@@ -234,7 +293,7 @@ def main():
 		except KeyboardInterrupt as e:
 			try:
 				_log("\nAttempting to send 'quit'")
-				_SOCK.sendall(struct.pack('!HH', 4, 0) + b'quit')
+				_SOCK.sendall(struct.pack('!BH', 4, 0) + b'quit')
 				_log("Sent")
 			except OSError as e2:
 				pass
@@ -243,6 +302,10 @@ def main():
 
 
 if __name__ == "__main__":
+	"""Standard main boiler-plate for python
+	This ensures that main function does not execute on import
+	-only run if this script was invoked as the main script.
+	"""
 	check_args(sys.argv)
 	main()
 
